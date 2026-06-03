@@ -4,21 +4,52 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.gridspec import GridSpec
 from matplotlib.widgets import Button, Slider
 
-N       = 120          # число молекул
-L       = 30.0         # длина стороны квадратного сосуда
-V_MEAN  = 6.5          
+N       = 120
+L       = 8.0
+V_MEAN  = 4.0          
 MODE    = "real"       
-V_MEAN_REAL = 4.5      
+V_MEAN_REAL = 1.5
 
-#Константы 
 m       = 1.0          
 kB      = 1.0          
-SIGMA   = 1.0          
+SIGMA   = 0.18
 EPS     = 1.0          
 RCUT    = 2.5 * SIGMA  
 DT      = 0.002        
 DIM     = 2           
-RAD_IDEAL = 0.25       
+RAD_IDEAL = 0.05
+IDEAL_MARKER_PX = 18.0
+
+USE_SI = False
+KB_SI    = 1.380649e-23
+SIGMA_SI = 3.40e-10
+EPS0_SI  = 120.0 * KB_SI
+MASS_SI  = 39.95 * 1.66053907e-27
+T_FACTOR = EPS0_SI / KB_SI
+V_FACTOR = SIGMA_SI ** 2
+P_FACTOR = EPS0_SI / (SIGMA_SI ** 2)
+
+def conv_T(t):   return t * T_FACTOR if USE_SI else t
+def conv_S(s):   return s * V_FACTOR if USE_SI else s
+def conv_P(p):   return p * P_FACTOR if USE_SI else p
+
+def u_T():  return "К"   if USE_SI else "(LJ)"
+def u_S():  return "м²"  if USE_SI else "(LJ)"
+def u_P():  return "Па"  if USE_SI else "(LJ)"
+
+def fmt(value, kind):
+    if kind == "T": v, u = conv_T(value), u_T()
+    elif kind == "S": v, u = conv_S(value), u_S()
+    elif kind == "P": v, u = conv_P(value), u_P()
+    else: v, u = value, ""
+    if not USE_SI:
+        if kind == "P": return f"{v:.4f} {u}"
+        if kind == "S": return f"{v:.1f} {u}"
+        return f"{v:.3f} {u}"
+    av = abs(v)
+    if av != 0 and (av < 1e-2 or av >= 1e4):
+        return f"{v:.2e} {u}"
+    return f"{v:.3g} {u}"
 
 def lj_potential(r):
     sr6 = (SIGMA / r) ** 6
@@ -62,16 +93,17 @@ class GasSystem:
     def reset(self):
         global L, V_MEAN, V_MEAN_REAL
         cols = int(np.ceil(np.sqrt(N)))
-        cell = (L - 2.0) / cols
+        cell = (L - 0.6) / cols
         xs, ys = [], []
         for i in range(cols):
             for j in range(cols):
                 if len(xs) >= N: break
-                xs.append(1.0 + cell * (i + 0.5))
-                ys.append(1.0 + cell * (j + 0.5))
+                xs.append(0.3 + cell * (i + 0.5))
+                ys.append(0.3 + cell * (j + 0.5))
         
-        self.x = np.clip(np.array(xs[:N]), 0.5, L-0.5)
-        self.y = np.clip(np.array(ys[:N]), 0.5, L-0.5)
+        rad = RAD_IDEAL if MODE == "ideal" else SIGMA * 0.5
+        self.x = np.clip(np.array(xs[:N]), rad, L - rad)
+        self.y = np.clip(np.array(ys[:N]), rad, L - rad)
 
         if MODE == "ideal":
             ang = np.random.uniform(0, 2 * np.pi, N)
@@ -83,13 +115,12 @@ class GasSystem:
         self.fx = np.zeros(N)
         self.fy = np.zeros(N)
         self.flash = np.zeros(N)
-
         self.reset_measurements()
 
         if MODE == "real":
             self.compute_forces_lj()
 
-        warm = 600
+        warm = 400
         for _ in range(warm):
             self.step()
         self.reset_measurements()
@@ -110,7 +141,7 @@ class GasSystem:
         r2 = dx * dx + dy * dy
         iu = np.triu_indices(N, k=1)
         dx, dy, r2 = dx[iu], dy[iu], r2[iu]
-        mask = (r2 < rc2) & (r2 > 1e-6)
+        mask = (r2 < rc2) & (r2 > 1e-7)
         dx, dy, r2 = dx[mask], dy[mask], r2[mask]
         if r2.size == 0: return 0.0
 
@@ -128,7 +159,7 @@ class GasSystem:
         return np.sum(f_over_r * r2)
 
     def elastic_collisions(self):
-        rad = RAD_IDEAL if MODE == "ideal" else (SIGMA * 0.5)
+        rad = RAD_IDEAL if MODE == "ideal" else SIGMA * 0.5
         d = 2.0 * rad
         d2 = d * d
         dx = self.x[:, None] - self.x[None, :]
@@ -183,7 +214,7 @@ class GasSystem:
 
     def step(self):
         self.flash *= 0.85
-        rad = RAD_IDEAL if MODE == "ideal" else (SIGMA * 0.5)
+        rad = RAD_IDEAL if MODE == "ideal" else SIGMA * 0.5
         
         if MODE == "ideal":
             self.x += self.vx * DT
@@ -219,24 +250,20 @@ class GasSystem:
         P_hits = self.wall_impulse / (perimeter * self.meas_time) if self.meas_time > 0 else 0.0
         hit_rate = self.wall_hits / self.meas_time if self.meas_time > 0 else 0.0
         P_mkt = N * m * mean_v2 / (DIM * S)
-        if MODE == "real" and self.virial_steps > 0:
-            mean_virial = self.virial_sum / self.virial_steps
+        if MODE == "real":
+            denom = S - N * B_VDW
+            if denom > 1e-6:
+                P_vdw = N * kB * T / denom - A_VDW * (N ** 2) / (S ** 2)
+            else:
+                P_vdw = N * kB * T / S - A_VDW * (N ** 2) / (S ** 2)
             P_kin = N * kB * T / S
-            P_vir_term = mean_virial / (DIM * S)
-            P_theory = P_kin + P_vir_term
+            P_theory = P_vdw
         else:
             P_kin = P_mkt
-            P_vir_term = 0.0
+            P_vdw = P_mkt
             P_theory = P_mkt
         return dict(S=S, T=T, mean_v=mean_v, mean_v2=mean_v2, P_hits=P_hits, hit_rate=hit_rate,
-                    P_mkt=P_mkt, P_kin=P_kin, P_vir=P_vir_term, P_theory=P_theory)
-
-def vdw_pressure(S, T):
-    denom = S - N * B_VDW
-    if denom <= 1e-2:
-        return 0.0
-    a_term = (A_VDW * N ** 2 / S ** 2) if A_VDW > 0.0 else 0.0
-    return N * kB * T / denom - a_term
+                    P_mkt=P_mkt, P_kin=P_kin, P_vdw=P_vdw, P_theory=P_theory)
 
 gas = GasSystem()
 
@@ -256,7 +283,6 @@ ax_maxw  = fig.add_subplot(gs[0, 1])
 ax_press = fig.add_subplot(gs[1, 1])
 ax_vdw   = fig.add_subplot(gs[:, 2])
 
-#Сосуд
 ax_box.set_xlim(0, L); ax_box.set_ylim(0, L)
 ax_box.set_aspect("equal"); ax_box.set_xticks([]); ax_box.set_yticks([])
 for s in ax_box.spines.values():
@@ -264,51 +290,117 @@ for s in ax_box.spines.values():
 scat = ax_box.scatter(gas.x, gas.y, c="#3b82f6", edgecolors="none")  
 box_title = ax_box.set_title("", color="#10b981", fontweight="bold")
 
-#Максвелл
 ax_maxw.set_xlabel("скорость |v|"); ax_maxw.set_ylabel("плотность F(v)")
 
-#Давление
-ax_press.set_xlabel("кадр"); ax_press.set_ylabel("P")
+ax_press.set_xlabel("кадр")
 press_hist, theory_hist = [], []
 (line_p,) = ax_press.plot([], [], color="#10b981", lw=2, label="P по ударам")
-(line_t,) = ax_press.plot([], [], color="#3b82f6", lw=2, ls="--", label="P теоретическое")
+(line_t,) = ax_press.plot([], [], color="#3b82f6", lw=2, ls="--", label="P Ван-дер-Ваальса")
 ax_press.legend(fontsize=7, loc="upper right", framealpha=0.3)
 
-#Изотермы
-ax_vdw.set_xlabel("Площадь сосуда S (Объем V)")
-ax_vdw.set_ylabel("Давление Ван-дер-Ваальса P")
+vdw_title = ax_vdw.set_title("Изотермы Ван-дер-Ваальса", fontsize=10, color="#e8e8ec")
 
-S_space = np.linspace(195, 2550, 600)
-ISO_TEMPS = [0.5, 2.0, 10.0, 30.0, 70.0]  
+def apply_axis_units():
+    ax_press.set_ylabel(f"P, {u_P()}")
+    ax_vdw.set_xlabel(f"Площадь сосуда S (Объём V), {u_S()}")
+    if MODE == "ideal" or EPS <= 1e-6:
+        ax_vdw.set_ylabel(f"Давление P (идеальный газ), {u_P()}")
+    else:
+        ax_vdw.set_ylabel(f"Давление Ван-дер-Ваальса P, {u_P()}")
+
+S_MIN_PLOT, S_MAX_PLOT = 8.0, 200.0
+P_MAX_PLOT = 12.0  
+ISO_TEMPS = [0.4, 0.7, 1.1, 1.6, 2.5]
+ISO_COLORS = ["#3b82f6", "#22d3ee", "#10b981", "#f59e0b", "#f43f5e"]
+
+def iso_s_space():
+    return np.linspace(S_MIN_PLOT, S_MAX_PLOT, 800)
+
+def compute_isotherm(T_iso, S):
+    b_tot = N * B_VDW
+    denom = S - b_tot
+    P = np.where(denom > 1e-3,
+                 N * kB * T_iso / denom - A_VDW * (N**2) / (S**2),
+                 np.nan)
+    return P
+
+S_space = iso_s_space()
 isotherm_lines = []
+for k, T_iso in enumerate(ISO_TEMPS):
+    (line,) = ax_vdw.plot([], [], lw=1.4, alpha=0.6,
+                          color=ISO_COLORS[k % len(ISO_COLORS)], label=f"T = {T_iso:.1f}")
+    isotherm_lines.append([line, T_iso])
 
-b_tot = N * B_VDW
-for T_iso in ISO_TEMPS:
-    P_iso = N * kB * T_iso / (S_space - b_tot) - A_VDW * (N**2) / (S_space**2)
-    P_iso = np.where(S_space > b_tot + 8, P_iso, np.nan)
-    (line,) = ax_vdw.plot(S_space, P_iso, lw=1.3, alpha=0.5, label=f"T = {T_iso}")
-    isotherm_lines.append((line, T_iso))
+def redraw_isotherms():
+    for line, T_iso in isotherm_lines:
+        if MODE == "ideal":
+            P_iso = N * kB * T_iso / S_space
+        else:
+            P_iso = compute_isotherm(T_iso, S_space)
+        line.set_data(conv_S(S_space), conv_P(P_iso))
 
-(crit_pt,) = ax_vdw.plot([], [], "o", color="#10b981", ms=7, label="Крит. точка K")
+def apply_vdw_limits():
+    ax_vdw.set_xlim(conv_S(S_MIN_PLOT - 5), conv_S(S_MAX_PLOT))
+    ax_vdw.set_ylim(0, conv_P(P_MAX_PLOT))
+
+(dynamic_iso_line,) = ax_vdw.plot([], [], lw=2.2, ls="--", color="#ffffff", label="Текущая T (Теория)")
+
+(crit_pt,) = ax_vdw.plot([], [], "o", color="#ffffff", ms=8,
+                         markeredgecolor="#10b981", markeredgewidth=1.6, label="Крит. точка K")
+
+def apply_vdw_labels():
+    if MODE == "ideal" or EPS <= 1e-6:
+        vdw_title.set_text("Изотермы идеального газа")
+    else:
+        vdw_title.set_text("Изотермы Ван-дер-Ваальса")
+    apply_axis_units()
 
 def update_crit_pt_position():
-    if A_VDW > 0:
-        crit_pt.set_data([V_C], [P_C])
+    in_range = (MODE == "real" and EPS > 1e-6 and A_VDW > 0 and P_C > 0
+                and S_MIN_PLOT <= V_C <= S_MAX_PLOT and P_C <= P_MAX_PLOT)
+    if in_range:
+        crit_pt.set_data([conv_S(V_C)], [conv_P(P_C)])
         crit_pt.set_visible(True)
+        crit_pt.set_label("Крит. точка K")
     else:
+        crit_pt.set_data([], [])
         crit_pt.set_visible(False)
+        crit_pt.set_label(" ε=0")
+    ax_vdw.legend(fontsize=7, loc="upper right", framealpha=0.3)
 
+apply_vdw_limits()
+redraw_isotherms()
+apply_vdw_labels()
 update_crit_pt_position()
-
-ax_vdw.set_xlim(180, 2550)
-ax_vdw.set_ylim(0, 40.0)  
-ax_vdw.legend(fontsize=7, loc="upper right", framealpha=0.3)
 
 (vdw_pt,) = ax_vdw.plot([], [], "o", color="#f43f5e", ms=11, markeredgecolor="#fff", markeredgewidth=1.5)
 vdw_trail_x, vdw_trail_y = [], []
 (vdw_trail,) = ax_vdw.plot([], [], "-", color="#f43f5e", alpha=0.35, lw=1.5)
 
 info_text = fig.text(0.015, 0.02, "", fontsize=9, family="monospace", color="#c8c8d0", va="bottom")
+
+eq_text = fig.text(0.18, 0.295, "", fontsize=14, color="#ffffff", ha="center", va="center")
+eq_sub = fig.text(0.18, 0.235, "", fontsize=9, color="#d0d0d8", ha="center", va="center")
+eq_calc = fig.text(0.18, 0.195, "", fontsize=9, color="#9ca3af", ha="center", va="center", family="monospace")
+eq_pcalc = fig.text(0.18, 0.16, "", fontsize=9.5, color="#10b981", ha="center", va="center", family="monospace")
+
+units_note = fig.text(
+    0.18, 0.125, "",
+    fontsize=7.5, color="#666", ha="center", va="center", style="italic",
+)
+
+def update_eq_text():
+    if MODE == "ideal":
+        eq_text.set_text(r"$P \, S = N\, k_B\, T$")
+        eq_sub.set_text("идеальный газ: молекулы-точки, без взаимодействия")
+    elif EPS <= 1e-6:
+        eq_text.set_text(r"$P \, (S - N b) = N\, k_B\, T$")
+        eq_sub.set_text("ε = 0: a = 0 ⇒ остаётся только объём молекул (жёсткие сферы)")
+    else:
+        eq_text.set_text(r"$\left(P + \dfrac{a\, N^2}{S^2}\right)(S - N b) = N\, k_B\, T$")
+        eq_sub.set_text("реальный газ (Ван-дер-Ваальс): a > 0 (притяжение), b > 0 (объём)")
+
+update_eq_text()
 
 widget_color = '#1f2937'
 hover_color = '#374151'
@@ -321,16 +413,21 @@ ax_btn_reset = fig.add_axes([0.58, 0.12, 0.08, 0.06])
 btn_reset = Button(ax_btn_reset, 'СБРОС', color='#7f1d1d', hovercolor='#991b1b')
 btn_reset.label.set_color('#e8e8ec')
 
+ax_btn_units = fig.add_axes([0.45, 0.045, 0.21, 0.05])
+btn_units = Button(ax_btn_units, f'Единицы: {"СИ" if USE_SI else "LJ"}',
+                   color=widget_color, hovercolor=hover_color)
+btn_units.label.set_color('#e8e8ec')
+
 ax_slider_L = fig.add_axes([0.75, 0.16, 0.2, 0.02])
-slider_L = Slider(ax_slider_L, 'Размер сосуда (L)', 15.0, 50.0, valinit=L, color="#10b981")
+slider_L = Slider(ax_slider_L, 'Размер сосуда (L)', 5.0, 14.0, valinit=L, color="#10b981")
 slider_L.label.set_color('#e8e8ec'); slider_L.valtext.set_color('#e8e8ec')
 
 ax_slider_V = fig.add_axes([0.75, 0.10, 0.2, 0.02])
-slider_V = Slider(ax_slider_V, 'Ср. Скорость', 0.5, 15.0, valinit=V_MEAN_REAL if MODE=="real" else V_MEAN, color="#f59e0b")
+slider_V = Slider(ax_slider_V, 'Ср. Скорость', 0.3, 5.0, valinit=V_MEAN_REAL if MODE=="real" else V_MEAN, color="#f59e0b")
 slider_V.label.set_color('#e8e8ec'); slider_V.valtext.set_color('#e8e8ec')
 
 ax_slider_E = fig.add_axes([0.75, 0.04, 0.2, 0.02])
-slider_E = Slider(ax_slider_E, 'ε', 0.0, 1.5, valinit=EPS, color="#a855f7")
+slider_E = Slider(ax_slider_E, 'ε', 0.0, 3.0, valinit=EPS, color="#a855f7")
 slider_E.label.set_color('#e8e8ec'); slider_E.valtext.set_color('#e8e8ec')
 
 def apply_eps_visibility():
@@ -351,7 +448,30 @@ def toggle_mode(event):
     btn_mode.label.set_text(f'Режим:\n{MODE.upper()}')
     slider_V.set_val(V_MEAN_REAL if MODE == "real" else V_MEAN)
     apply_eps_visibility()
+    
+    if MODE == "ideal":
+        redraw_isotherms()
+        crit_pt.set_data([], [])
+        crit_pt.set_visible(False)
+        dynamic_iso_line.set_visible(False)
+    else:
+        redraw_isotherms()
+        update_crit_pt_position()
+        dynamic_iso_line.set_visible(True)
+    apply_vdw_limits()
+    apply_vdw_labels()
+    update_eq_text()
     gas.reset()
+    clear_histories()
+
+def toggle_units(event):
+    global USE_SI
+    USE_SI = not USE_SI
+    btn_units.label.set_text(f'Единицы: {"СИ" if USE_SI else "LJ"}')
+    apply_vdw_limits()
+    redraw_isotherms()
+    apply_vdw_labels()
+    update_crit_pt_position()
     clear_histories()
 
 def reset_sim(event):
@@ -360,7 +480,7 @@ def reset_sim(event):
 
 def update_L(val):
     global L
-    rad = RAD_IDEAL if MODE == "ideal" else SIGMA * 0.5
+    rad = SIGMA * 0.5
     s = val / L if L > 1e-6 else 1.0
     c_old = L / 2.0
     c_new = val / 2.0
@@ -389,26 +509,25 @@ def update_V(val):
     gas.reset_measurements()
 
 def update_E(val):
-    global EPS
+    global EPS, S_space
     EPS = val
-    update_vdw_constants()       
+    update_vdw_constants()
     gas.reset_measurements()
     vdw_trail_x.clear(); vdw_trail_y.clear()
-    
-    b_t = N * B_VDW
-    for line, T_iso in isotherm_lines:
-        P_iso = N * kB * T_iso / (S_space - b_t) - A_VDW * (N**2) / (S_space**2)
-        P_iso = np.where(S_space > b_t + 8, P_iso, np.nan)
-        line.set_ydata(P_iso)
-        
+
+    S_space = iso_s_space()
+    redraw_isotherms()
+
+    apply_vdw_labels()
     update_crit_pt_position()
+    update_eq_text()
 
 btn_mode.on_clicked(toggle_mode)
 btn_reset.on_clicked(reset_sim)
+btn_units.on_clicked(toggle_units)
 slider_L.on_changed(update_L)
 slider_V.on_changed(update_V)
 slider_E.on_changed(update_E)
-
 
 def update(_):
     for _ in range(4): 
@@ -428,11 +547,19 @@ def update(_):
 
     bbox = ax_box.get_window_extent()
     if bbox.width > 1:
-        points_per_unit = (bbox.width / L) / (fig.dpi / 72.0)
-        s_marker = (points_per_unit * (2.0 * RAD_IDEAL if MODE == "ideal" else SIGMA)) ** 2
+        if MODE == "ideal":
+            s_marker = IDEAL_MARKER_PX
+        else:
+            points_per_unit = (bbox.width / L) / (fig.dpi / 72.0)
+            diameter = SIGMA
+            s_marker = (points_per_unit * diameter) ** 2
         scat.set_sizes([s_marker] * N)
 
-    box_title.set_text(f"{'ИДЕАЛЬНЫЙ (МКТ)' if MODE == 'ideal' else 'РЕАЛЬНЫЙ (ЛД)'}   N={N}, L={L:.1f}")
+    if MODE == "ideal":
+        box_label = "ИДЕАЛЬНЫЙ (МКТ)"
+    else:
+        box_label = "ИДЕАЛЬНЫЙ (ε=0)" if EPS <= 1e-6 else "РЕАЛЬНЫЙ (ЛД)"
+    box_title.set_text(f"{box_label}   N={N}, L={L:.1f}")
 
     ax_maxw.cla()
     ax_maxw.set_title("Распределение скоростей", fontsize=10, color="#e8e8ec")
@@ -448,44 +575,81 @@ def update(_):
     theory_hist.append(M["P_theory"])
     if len(press_hist) > 200:
         press_hist.pop(0); theory_hist.pop(0)
-    
+
     if press_hist:
         xs = range(len(press_hist))
-        line_p.set_data(xs, press_hist)
-        line_t.set_data(xs, theory_hist)
+        line_p.set_data(xs, [conv_P(p) for p in press_hist])
+        line_t.set_data(xs, [conv_P(p) for p in theory_hist])
+        line_t.set_label("P Ван-дер-Ваальса" if MODE == "real" else "P по МКТ")
+        ax_press.legend(fontsize=7, loc="upper right", framealpha=0.3)
         ax_press.set_xlim(0, max(50, len(press_hist)))
-        ymax = max(max(press_hist + theory_hist, default=1e-3), 1e-3) * 1.3
+        recent = press_hist[-40:] + theory_hist[-40:]
+        scale = np.median(recent) if recent else 1e-3
+        ymax = conv_P(max(scale * 2.2, 1e-3))
         ax_press.set_ylim(0, ymax)
 
     if MODE == "real":
         S = M["S"]
-        P_real = M["P_theory"]
-        vdw_pt.set_data([S], [P_real])
+        P_real = M["P_vdw"]
+        vdw_pt.set_data([conv_S(S)], [conv_P(P_real)])
         vdw_trail_x.append(S); vdw_trail_y.append(P_real)
         if len(vdw_trail_x) > 60:
             vdw_trail_x.pop(0); vdw_trail_y.pop(0)
-        vdw_trail.set_data(vdw_trail_x, vdw_trail_y)
+        vdw_trail.set_data([conv_S(s) for s in vdw_trail_x],
+                           [conv_P(p) for p in vdw_trail_y])
+        P_dyn = compute_isotherm(T_curr, S_space)
+        dynamic_iso_line.set_data(conv_S(S_space), conv_P(P_dyn))
+        dynamic_iso_line.set_visible(True)
     else:
         vdw_pt.set_data([], [])
         vdw_trail.set_data([], [])
+        dynamic_iso_line.set_visible(False)
+
+    S_now = M['S']
+    NkT = N * kB * M['T']
+    if MODE == "ideal":
+        lhs = M['P_hits'] * S_now
+        eq_calc.set_text(f"P·S = {lhs:.0f}   ≈   N·k·T = {NkT:.0f}")
+        P_formula = NkT / S_now
+        eq_pcalc.set_text(f"P = N·k·T/S = {P_formula:.3f}")
+    elif EPS <= 1e-6:
+        lhs = M['P_vdw'] * (S_now - N * B_VDW)
+        eq_calc.set_text(f"P·(S−Nb) = {lhs:.0f}   ≈   N·k·T = {NkT:.0f}")
+        P_formula = NkT / (S_now - N * B_VDW)
+        eq_pcalc.set_text(f"P = N·k·T/(S−Nb) = {P_formula:.3f}")
+    else:
+        a_term = A_VDW * N**2 / S_now**2
+        lhs = (M['P_vdw'] + a_term) * (S_now - N * B_VDW)
+        eq_calc.set_text(f"(P+aN²/S²)(S−Nb) = {lhs:.0f}   ≈   N·k·T = {NkT:.0f}")
+        P_formula = NkT / (S_now - N * B_VDW) - a_term
+        eq_pcalc.set_text(f"P = N·k·T/(S−Nb) − a·N²/S² = {P_formula:.3f}")
 
     if MODE == "ideal":
         info = (
             f"ИДЕАЛЬНЫЙ ГАЗ\n"
-            f"Температура T = {M['T']:.3f}\n"
-            f"P по ударам = {M['P_hits']:.4f}\n"
-            f"P по МКТ    = {M['P_mkt']:.4f}\n"
-            f"P·S ≈ N·k·T : {M['P_hits']*M['S']:.0f} ≈ {N*kB*M['T']:.0f}"
+            f"T = {fmt(M['T'],'T')}\n"
+            f"P по ударам = {fmt(M['P_hits'],'P')}\n"
+            f"P по МКТ    = {fmt(M['P_mkt'],'P')}"
         )
     else:
-        attract = "ВКЛ" if EPS > 1e-6 else "ВЫКЛ (газ жестких сфер)"
-        info = (
-            f"РЕАЛЬНЫЙ ГАЗ (Леннард-Джонс)\n"
-            f"T = {M['T']:.3f}   Площадь(S) = {M['S']:.0f}   ε = {EPS:.2f}  притяжение: {attract}\n"
-            f"P по ударам = {M['P_hits']:.4f}    P теория = {M['P_theory']:.4f}\n"
-            
-        )
+        if EPS <= 1e-6:
+            info = (
+                f"ИДЕАЛЬНЫЙ ГАЗ (ε = 0: жёсткие сферы, σ = {SIGMA})\n"
+                f"T = {fmt(M['T'],'T')}   Площадь(S) = {fmt(M['S'],'S')}   ε = {EPS:.2f}\n"
+                f"P по ударам = {fmt(M['P_hits'],'P')}    P Ван-дер-Ваальса = {fmt(M['P_vdw'],'P')}"
+            )
+        else:
+            info = (
+                f"РЕАЛЬНЫЙ ГАЗ (Молекулы малы: σ = {SIGMA})\n"
+                f"T = {fmt(M['T'],'T')}   Площадь(S) = {fmt(M['S'],'S')}   ε = {EPS:.2f}\n"
+                f"P по ударам = {fmt(M['P_hits'],'P')}    P Ван-дер-Ваальса = {fmt(M['P_vdw'],'P')}"
+            )
     info_text.set_text(info)
+
+    if USE_SI:
+        units_note.set_text("единицы СИ (эталон — аргон: σ=3.40 Å, ε/k=120 К, m=39.95 а.е.м.)")
+    else:
+        units_note.set_text("приведённые единицы Леннард-Джонса (m=σ=ε₀=k=1)")
 
     return scat,
 
