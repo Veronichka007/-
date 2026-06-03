@@ -29,27 +29,105 @@ T_FACTOR = EPS0_SI / KB_SI
 V_FACTOR = SIGMA_SI ** 2
 P_FACTOR = EPS0_SI / (SIGMA_SI ** 2)
 
+E_FACTOR = EPS0_SI
+L_FACTOR = SIGMA_SI
+VEL_FACTOR = np.sqrt(EPS0_SI / MASS_SI)
+
 def conv_T(t):   return t * T_FACTOR if USE_SI else t
 def conv_S(s):   return s * V_FACTOR if USE_SI else s
 def conv_P(p):   return p * P_FACTOR if USE_SI else p
+def conv_E(e):   return e * E_FACTOR if USE_SI else e
+def conv_L(x):   return x * L_FACTOR if USE_SI else x
+def conv_VEL(v): return v * VEL_FACTOR if USE_SI else v
 
 def u_T():  return "К"   if USE_SI else "(LJ)"
 def u_S():  return "м²"  if USE_SI else "(LJ)"
 def u_P():  return "Па"  if USE_SI else "(LJ)"
+def u_E():  return "Дж"  if USE_SI else "(LJ)"
+def u_L():  return "м"   if USE_SI else "(LJ)"
+def u_VEL():return "м/с" if USE_SI else "(LJ)"
+
+PREFIXES = [
+    (1e24, "Y"), (1e21, "Z"), (1e18, "E"), (1e15, "P"), (1e12, "T"),
+    (1e9, "Г"), (1e6, "М"), (1e3, "к"), (1.0, ""),
+    (1e-3, "м"), (1e-6, "мк"), (1e-9, "н"), (1e-12, "п"),
+    (1e-15, "ф"), (1e-18, "а"), (1e-21, "з"), (1e-24, "и"),
+]
+
+def _pick_prefix(av):
+    for scale, pref in PREFIXES:
+        if av >= scale:
+            return scale, pref
+    return PREFIXES[-1]
+
+def _fmt_num(x):
+    ax = abs(x)
+    if ax == 0:
+        return "0"
+    if ax >= 100:
+        return f"{x:.0f}"
+    if ax >= 10:
+        return f"{x:.1f}"
+    return f"{x:.2f}"
+
+def fmt_si(value, conv, base_unit, area=False):
+    """Форматирует число с метрической приставкой вместо записи 3.4e-10."""
+    v = conv(value)
+    if not USE_SI:
+        return f"{v:.3f} {base_unit}"
+    if v == 0:
+        return f"0 {base_unit}"
+    av = abs(v)
+    if area:
+        # для площади приставку подбираем по линейному размеру (√), возводим в квадрат
+        lin = np.sqrt(av)
+        scale, pref = _pick_prefix(lin)
+        num = v / (scale ** 2)
+        return f"{_fmt_num(num)} {pref}{base_unit}"
+    scale, pref = _pick_prefix(av)
+    num = v / scale
+    return f"{_fmt_num(num)} {pref}{base_unit}"
+
+def make_tick_formatter(base_unit, area=False, ref_value=None):
+    """FuncFormatter для оси: значения уже в СИ. Единая приставка по ref_value."""
+    from matplotlib.ticker import FuncFormatter
+    if not USE_SI:
+        def _lj(v, pos):
+            if v == 0:
+                return "0"
+            return f"{v:.0f}" if abs(v) >= 10 else f"{v:.2f}"
+        _lj.unit = base_unit
+        return FuncFormatter(_lj)
+    if area:
+        lin = np.sqrt(abs(ref_value)) if ref_value else 1.0
+        scale, pref = _pick_prefix(lin)
+        denom = scale ** 2
+    else:
+        scale, pref = _pick_prefix(abs(ref_value) if ref_value else 1.0)
+        denom = scale
+    unit = f"{pref}{base_unit}"
+    def _f(v, pos):
+        if v == 0:
+            return "0"
+        return f"{v/denom:.0f}" if abs(v/denom) >= 10 else f"{v/denom:.1f}"
+    _f.unit = unit
+    return FuncFormatter(_f)
+
+def fmt_val(value, conv, unit):
+    if conv is conv_S:
+        return fmt_si(value, conv, "м²" if USE_SI else "(LJ)", area=True)
+    if USE_SI:
+        base = {id(conv_L): "м", id(conv_P): "Па", id(conv_E): "Дж",
+                id(conv_VEL): "м/с", id(conv_T): "К"}.get(id(conv), unit)
+    else:
+        base = unit
+    return fmt_si(value, conv, base, area=False)
 
 def fmt(value, kind):
-    if kind == "T": v, u = conv_T(value), u_T()
-    elif kind == "S": v, u = conv_S(value), u_S()
-    elif kind == "P": v, u = conv_P(value), u_P()
-    else: v, u = value, ""
-    if not USE_SI:
-        if kind == "P": return f"{v:.4f} {u}"
-        if kind == "S": return f"{v:.1f} {u}"
-        return f"{v:.3f} {u}"
-    av = abs(v)
-    if av != 0 and (av < 1e-2 or av >= 1e4):
-        return f"{v:.2e} {u}"
-    return f"{v:.3g} {u}"
+    if kind == "T": return fmt_si(value, conv_T, "К" if USE_SI else "(LJ)")
+    if kind == "S": return fmt_si(value, conv_S, "м²" if USE_SI else "(LJ)", area=True)
+    if kind == "P": return fmt_si(value, conv_P, "Па" if USE_SI else "(LJ)")
+    return _fmt_num(value)
 
 def lj_potential(r):
     sr6 = (SIGMA / r) ** 6
@@ -301,12 +379,24 @@ ax_press.legend(fontsize=7, loc="upper right", framealpha=0.3)
 vdw_title = ax_vdw.set_title("Изотермы Ван-дер-Ваальса", fontsize=10, color="#e8e8ec")
 
 def apply_axis_units():
-    ax_press.set_ylabel(f"P, {u_P()}")
-    ax_vdw.set_xlabel(f"Площадь сосуда S (Объём V), {u_S()}")
+    # ось давления (средний график)
+    fmt_p_press = make_tick_formatter("Па", area=False, ref_value=conv_P(P_MAX_PLOT))
+    ax_press.yaxis.set_major_formatter(fmt_p_press)
+    ax_press.set_ylabel(f"P, {getattr(fmt_p_press.func,'unit',u_P())}")
+
+    # ось X правого графика — площадь S
+    fmt_s = make_tick_formatter("м²", area=True, ref_value=conv_S(S_MAX_PLOT))
+    ax_vdw.xaxis.set_major_formatter(fmt_s)
+    ax_vdw.set_xlabel(f"Площадь сосуда S (Объём V), {getattr(fmt_s.func,'unit',u_S())}")
+
+    # ось Y правого графика — давление P
+    fmt_p = make_tick_formatter("Па", area=False, ref_value=conv_P(P_MAX_PLOT))
+    ax_vdw.yaxis.set_major_formatter(fmt_p)
+    p_unit = getattr(fmt_p.func, 'unit', u_P())
     if MODE == "ideal" or EPS <= 1e-6:
-        ax_vdw.set_ylabel(f"Давление P (идеальный газ), {u_P()}")
+        ax_vdw.set_ylabel(f"Давление P (идеальный газ), {p_unit}")
     else:
-        ax_vdw.set_ylabel(f"Давление Ван-дер-Ваальса P, {u_P()}")
+        ax_vdw.set_ylabel(f"Давление Ван-дер-Ваальса P, {p_unit}")
 
 S_MIN_PLOT, S_MAX_PLOT = 8.0, 200.0
 P_MAX_PLOT = 12.0  
@@ -338,6 +428,8 @@ def redraw_isotherms():
         else:
             P_iso = compute_isotherm(T_iso, S_space)
         line.set_data(conv_S(S_space), conv_P(P_iso))
+        line.set_label(f"T = {fmt_val(T_iso,conv_T,u_T())}")
+    ax_vdw.legend(fontsize=7, loc="upper right", framealpha=0.3)
 
 def apply_vdw_limits():
     ax_vdw.set_xlim(conv_S(S_MIN_PLOT - 5), conv_S(S_MAX_PLOT))
@@ -427,7 +519,7 @@ slider_V = Slider(ax_slider_V, 'Ср. Скорость', 0.3, 5.0, valinit=V_MEA
 slider_V.label.set_color('#e8e8ec'); slider_V.valtext.set_color('#e8e8ec')
 
 ax_slider_E = fig.add_axes([0.75, 0.04, 0.2, 0.02])
-slider_E = Slider(ax_slider_E, 'ε', 0.0, 3.0, valinit=EPS, color="#a855f7")
+slider_E = Slider(ax_slider_E, 'ε  ', 0.0, 3.0, valinit=EPS, color="#a855f7")
 slider_E.label.set_color('#e8e8ec'); slider_E.valtext.set_color('#e8e8ec')
 
 def apply_eps_visibility():
@@ -435,7 +527,14 @@ def apply_eps_visibility():
     ax_slider_E.set_visible(vis)
     slider_E.set_active(vis)
 
+def apply_slider_units():
+    slider_L.label.set_text(f'Размер сосуда L, {u_L()}')
+    slider_V.label.set_text(f'Ср. скорость, {u_VEL()}')
+    slider_L.valtext.set_text(fmt_val(slider_L.val, conv_L, "").strip())
+    slider_V.valtext.set_text(fmt_val(slider_V.val, conv_VEL, "").strip())
+
 apply_eps_visibility()
+apply_slider_units()
 
 def clear_histories():
     press_hist.clear(); theory_hist.clear()
@@ -472,6 +571,7 @@ def toggle_units(event):
     redraw_isotherms()
     apply_vdw_labels()
     update_crit_pt_position()
+    apply_slider_units()
     clear_histories()
 
 def reset_sim(event):
@@ -494,6 +594,7 @@ def update_L(val):
     if MODE == "real":
         gas.compute_forces_lj()
     gas.reset_measurements()
+    slider_L.valtext.set_text(fmt_val(val, conv_L, "").strip())
 
 def update_V(val):
     global V_MEAN, V_MEAN_REAL
@@ -507,6 +608,7 @@ def update_V(val):
     else:
         V_MEAN_REAL = val
     gas.reset_measurements()
+    slider_V.valtext.set_text(fmt_val(val, conv_VEL, "").strip())
 
 def update_E(val):
     global EPS, S_space
@@ -559,17 +661,26 @@ def update(_):
         box_label = "ИДЕАЛЬНЫЙ (МКТ)"
     else:
         box_label = "ИДЕАЛЬНЫЙ (ε=0)" if EPS <= 1e-6 else "РЕАЛЬНЫЙ (ЛД)"
-    box_title.set_text(f"{box_label}   N={N}, L={L:.1f}")
+    box_title.set_text(f"{box_label}   N={N}, L={fmt_val(L,conv_L,u_L())}")
 
     ax_maxw.cla()
     ax_maxw.set_title("Распределение скоростей", fontsize=10, color="#e8e8ec")
     vmax = max(M['mean_v'] * 3.0, 1.0)
-    ax_maxw.hist(v, bins=24, range=(0, vmax), density=True, color="#10b981", alpha=0.55)
+    vel_k = VEL_FACTOR if USE_SI else 1.0   # масштаб скорости LJ -> м/с
+    # гистограмма по конвертированным скоростям; density сам перенормирует площадь к 1
+    ax_maxw.hist(conv_VEL(v), bins=24, range=(0, conv_VEL(vmax)),
+                 density=True, color="#10b981", alpha=0.55)
     T_curr = M["T"]
     if T_curr > 0:
         vv = np.linspace(0, vmax, 200)
         f_theo = (m / (kB * T_curr)) * vv * np.exp(-m * vv ** 2 / (2 * kB * T_curr))
-        ax_maxw.plot(vv, f_theo, color="#3b82f6", lw=2.5)
+        # смена переменной v->k*v: плотность делится на k, чтобы площадь осталась 1
+        ax_maxw.plot(conv_VEL(vv), f_theo / vel_k, color="#3b82f6", lw=2.5)
+
+    fmt_v = make_tick_formatter("м/с", area=False, ref_value=conv_VEL(vmax))
+    ax_maxw.xaxis.set_major_formatter(fmt_v)
+    ax_maxw.set_xlabel(f"Скорость |v|, {getattr(fmt_v.func,'unit',u_VEL())}")
+    ax_maxw.set_ylabel("Плотность F(v)")
 
     press_hist.append(M["P_hits"])
     theory_hist.append(M["P_theory"])
@@ -609,20 +720,20 @@ def update(_):
     NkT = N * kB * M['T']
     if MODE == "ideal":
         lhs = M['P_hits'] * S_now
-        eq_calc.set_text(f"P·S = {lhs:.0f}   ≈   N·k·T = {NkT:.0f}")
+        eq_calc.set_text(f"P·S = {fmt_val(lhs,conv_E,u_E())}   ≈   N·k·T = {fmt_val(NkT,conv_E,u_E())}")
         P_formula = NkT / S_now
-        eq_pcalc.set_text(f"P = N·k·T/S = {P_formula:.3f}")
+        eq_pcalc.set_text(f"P = N·k·T/S = {fmt_val(P_formula,conv_P,u_P())}")
     elif EPS <= 1e-6:
         lhs = M['P_vdw'] * (S_now - N * B_VDW)
-        eq_calc.set_text(f"P·(S−Nb) = {lhs:.0f}   ≈   N·k·T = {NkT:.0f}")
+        eq_calc.set_text(f"P·(S−Nb) = {fmt_val(lhs,conv_E,u_E())}   ≈   N·k·T = {fmt_val(NkT,conv_E,u_E())}")
         P_formula = NkT / (S_now - N * B_VDW)
-        eq_pcalc.set_text(f"P = N·k·T/(S−Nb) = {P_formula:.3f}")
+        eq_pcalc.set_text(f"P = N·k·T/(S−Nb) = {fmt_val(P_formula,conv_P,u_P())}")
     else:
         a_term = A_VDW * N**2 / S_now**2
         lhs = (M['P_vdw'] + a_term) * (S_now - N * B_VDW)
-        eq_calc.set_text(f"(P+aN²/S²)(S−Nb) = {lhs:.0f}   ≈   N·k·T = {NkT:.0f}")
+        eq_calc.set_text(f"(P+aN²/S²)(S−Nb) = {fmt_val(lhs,conv_E,u_E())}   ≈   N·k·T = {fmt_val(NkT,conv_E,u_E())}")
         P_formula = NkT / (S_now - N * B_VDW) - a_term
-        eq_pcalc.set_text(f"P = N·k·T/(S−Nb) − a·N²/S² = {P_formula:.3f}")
+        eq_pcalc.set_text(f"P = N·k·T/(S−Nb) − a·N²/S² = {fmt_val(P_formula,conv_P,u_P())}")
 
     if MODE == "ideal":
         info = (
