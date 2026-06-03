@@ -79,7 +79,6 @@ def fmt_si(value, conv, base_unit, area=False):
         return f"0 {base_unit}"
     av = abs(v)
     if area:
-        # для площади приставку подбираем по линейному размеру (√), возводим в квадрат
         lin = np.sqrt(av)
         scale, pref = _pick_prefix(lin)
         num = v / (scale ** 2)
@@ -379,17 +378,16 @@ ax_press.legend(fontsize=7, loc="upper right", framealpha=0.3)
 vdw_title = ax_vdw.set_title("Изотермы Ван-дер-Ваальса", fontsize=10, color="#e8e8ec")
 
 def apply_axis_units():
-    # ось давления (средний график)
     fmt_p_press = make_tick_formatter("Па", area=False, ref_value=conv_P(P_MAX_PLOT))
     ax_press.yaxis.set_major_formatter(fmt_p_press)
     ax_press.set_ylabel(f"P, {getattr(fmt_p_press.func,'unit',u_P())}")
 
-    # ось X правого графика — площадь S
+    
     fmt_s = make_tick_formatter("м²", area=True, ref_value=conv_S(S_MAX_PLOT))
     ax_vdw.xaxis.set_major_formatter(fmt_s)
     ax_vdw.set_xlabel(f"Площадь сосуда S (Объём V), {getattr(fmt_s.func,'unit',u_S())}")
 
-    # ось Y правого графика — давление P
+    
     fmt_p = make_tick_formatter("Па", area=False, ref_value=conv_P(P_MAX_PLOT))
     ax_vdw.yaxis.set_major_formatter(fmt_p)
     p_unit = getattr(fmt_p.func, 'unit', u_P())
@@ -666,15 +664,14 @@ def update(_):
     ax_maxw.cla()
     ax_maxw.set_title("Распределение скоростей", fontsize=10, color="#e8e8ec")
     vmax = max(M['mean_v'] * 3.0, 1.0)
-    vel_k = VEL_FACTOR if USE_SI else 1.0   # масштаб скорости LJ -> м/с
-    # гистограмма по конвертированным скоростям; density сам перенормирует площадь к 1
+    vel_k = VEL_FACTOR if USE_SI else 1.0  
     ax_maxw.hist(conv_VEL(v), bins=24, range=(0, conv_VEL(vmax)),
                  density=True, color="#10b981", alpha=0.55)
     T_curr = M["T"]
     if T_curr > 0:
         vv = np.linspace(0, vmax, 200)
         f_theo = (m / (kB * T_curr)) * vv * np.exp(-m * vv ** 2 / (2 * kB * T_curr))
-        # смена переменной v->k*v: плотность делится на k, чтобы площадь осталась 1
+        
         ax_maxw.plot(conv_VEL(vv), f_theo / vel_k, color="#3b82f6", lw=2.5)
 
     fmt_v = make_tick_formatter("м/с", area=False, ref_value=conv_VEL(vmax))
