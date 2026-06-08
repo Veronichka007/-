@@ -15,22 +15,22 @@ kB      = 1.0
 SIGMA   = 0.18
 EPS     = 1.0          
 RCUT    = 2.5 * SIGMA  
-DT      = 0.002        
+DT      = 0.0003        
 DIM     = 2           
 RAD_IDEAL = 0.05
 IDEAL_MARKER_PX = 18.0
 
-USE_SI = False
+USE_SI = True
 KB_SI    = 1.380649e-23
 SIGMA_SI = 3.40e-10
 EPS0_SI  = 120.0 * KB_SI
 MASS_SI  = 39.95 * 1.66053907e-27
 T_FACTOR = EPS0_SI / KB_SI
-V_FACTOR = SIGMA_SI ** 2
-P_FACTOR = EPS0_SI / (SIGMA_SI ** 2)
+V_FACTOR = (SIGMA_SI/SIGMA) ** 2
+P_FACTOR = EPS0_SI / ((SIGMA_SI/SIGMA) ** 2)
 
 E_FACTOR = EPS0_SI
-L_FACTOR = SIGMA_SI
+L_FACTOR = SIGMA_SI/SIGMA
 VEL_FACTOR = np.sqrt(EPS0_SI / MASS_SI)
 
 def conv_T(t):   return t * T_FACTOR if USE_SI else t
@@ -206,8 +206,7 @@ class GasSystem:
         self.wall_impulse = 0.0
         self.wall_hits = 0
         self.meas_time = 0.0
-        self.virial_sum = 0.0
-        self.virial_steps = 0
+
 
     def compute_forces_lj(self):
         self.fx[:] = 0.0
@@ -245,7 +244,7 @@ class GasSystem:
         iu = np.triu_indices(N, k=1)
         idx = np.where((r2[iu] < d2) & (r2[iu] > 1e-9))[0]
         
-        collision_virial = 0.0
+        
         for k in idx:
             i, j = iu[0][k], iu[1][k]
             rx, ry = self.x[i] - self.x[j], self.y[i] - self.y[j]
@@ -256,17 +255,12 @@ class GasSystem:
             vn = dvx * nx + dvy * ny
             if vn > 0: continue
             
-            if MODE == "real":
-                collision_virial += -m * vn * r
-                
             self.vx[i] -= vn * nx; self.vy[i] -= vn * ny
             self.vx[j] += vn * nx; self.vy[j] += vn * ny
             overlap = (d - r) / 2.0
             self.x[i] += nx * overlap; self.y[i] += ny * overlap
             self.x[j] -= nx * overlap; self.y[j] -= ny * overlap
             
-        if MODE == "real" and idx.size > 0:
-            self.virial_sum += collision_virial / DT
 
     def handle_walls(self, rad):
         mask = self.x < rad
@@ -307,13 +301,10 @@ class GasSystem:
             self.handle_walls(rad)
             self.elastic_collisions()
             
-            vir = self.compute_forces_lj()
             
             self.vx += 0.5 * DT * self.fx / m
             self.vy += 0.5 * DT * self.fy / m
             
-            self.virial_sum += vir
-            self.virial_steps += 1
             
         self.meas_time += DT
 
@@ -630,7 +621,7 @@ slider_V.on_changed(update_V)
 slider_E.on_changed(update_E)
 
 def update(_):
-    for _ in range(4): 
+    for _ in range(40): 
         gas.step()
 
     M = gas.measurements()
@@ -742,13 +733,13 @@ def update(_):
     else:
         if EPS <= 1e-6:
             info = (
-                f"ИДЕАЛЬНЫЙ ГАЗ (ε = 0: жёсткие сферы, σ = {SIGMA})\n"
+                f"ИДЕАЛЬНЫЙ ГАЗ (ε = 0: жёсткие сферы\n"
                 f"T = {fmt(M['T'],'T')}   Площадь(S) = {fmt(M['S'],'S')}   ε = {EPS:.2f}\n"
                 f"P по ударам = {fmt(M['P_hits'],'P')}    P Ван-дер-Ваальса = {fmt(M['P_vdw'],'P')}"
             )
         else:
             info = (
-                f"РЕАЛЬНЫЙ ГАЗ (Молекулы малы: σ = {SIGMA})\n"
+                f"РЕАЛЬНЫЙ ГАЗ\n"
                 f"T = {fmt(M['T'],'T')}   Площадь(S) = {fmt(M['S'],'S')}   ε = {EPS:.2f}\n"
                 f"P по ударам = {fmt(M['P_hits'],'P')}    P Ван-дер-Ваальса = {fmt(M['P_vdw'],'P')}"
             )
@@ -757,7 +748,7 @@ def update(_):
     if USE_SI:
         units_note.set_text("единицы СИ (эталон — аргон: σ=3.40 Å, ε/k=120 К, m=39.95 а.е.м.)")
     else:
-        units_note.set_text("приведённые единицы Леннард-Джонса (m=σ=ε₀=k=1)")
+        units_note.set_text("приведённые единицы Леннард-Джонса")
 
     return scat,
 
